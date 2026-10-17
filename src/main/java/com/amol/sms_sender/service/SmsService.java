@@ -1,9 +1,12 @@
+
 package com.amol.sms_sender.service;
 
 import com.amol.sms_sender.dto.SendSmsRequest;
 import com.amol.sms_sender.dto.SendSmsResponse;
+import com.amol.sms_sender.dto.SmsEvent;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.UUID;
 
 @Service
@@ -11,38 +14,40 @@ public class SmsService {
 
     private final BlockListService blockListService;
     private final SmsVendorService smsVendorService;
+    private final SmsEventProducer smsEventProducer;
 
     public SmsService(
             BlockListService blockListService,
-            SmsVendorService smsVendorService
+            SmsVendorService smsVendorService,
+            SmsEventProducer smsEventProducer
     ) {
         this.blockListService = blockListService;
         this.smsVendorService = smsVendorService;
+        this.smsEventProducer = smsEventProducer;
     }
 
     public SendSmsResponse sendSms(SendSmsRequest request) {
-
         String phoneNumber = request.getPhoneNumber();
 
-        // Step 1: Reject blocked users.
         if (blockListService.isBlocked(phoneNumber)) {
-            return new SendSmsResponse(
-                    phoneNumber,
-                    "BLOCKED",
-                    null
-            );
+            return new SendSmsResponse(phoneNumber, "BLOCKED", null);
         }
 
-        // Step 2: Call the mock SMS vendor.
-        String vendorStatus = smsVendorService.sendSms(
-                phoneNumber,
-                request.getMessage()
-        );
+        String vendorStatus =
+                smsVendorService.sendSms(phoneNumber, request.getMessage());
 
-        // Step 3: Generate an ID for this SMS operation.
         String messageId = UUID.randomUUID().toString();
 
-        // Step 4: Return the vendor's result.
+        SmsEvent event = new SmsEvent(
+                messageId,
+                phoneNumber,
+                request.getMessage(),
+                vendorStatus,
+                Instant.now()
+        );
+
+        smsEventProducer.publish(event);
+
         return new SendSmsResponse(
                 phoneNumber,
                 vendorStatus,
