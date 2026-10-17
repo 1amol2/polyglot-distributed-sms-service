@@ -259,7 +259,3 @@ This project explores:
 - Cross-language service integration between Java and Go.
 - MongoDB persistence.
 - Docker multi-stage builds and container networking.
-
-## License
-
-Add a license if you intend to distribute or open-source this project.
