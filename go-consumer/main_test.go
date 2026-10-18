@@ -1,14 +1,22 @@
-
 package main
 
 import (
+	"context"
+	"encoding/json"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
 func TestMessagesHandlerRejectsPost(t *testing.T) {
-	handler := messagesHandler(nil)
+	handler := messagesHandler(func(
+		ctx context.Context,
+		userID string,
+	) ([]bson.M, error) {
+		return []bson.M{}, nil
+	})
 
 	req := httptest.NewRequest(
 		http.MethodPost,
@@ -33,7 +41,12 @@ func TestMessagesHandlerRejectsPost(t *testing.T) {
 }
 
 func TestMessagesHandlerRejectsInvalidUserID(t *testing.T) {
-	handler := messagesHandler(nil)
+	handler := messagesHandler(func(
+		ctx context.Context,
+		userID string,
+	) ([]bson.M, error) {
+		return []bson.M{}, nil
+	})
 
 	tests := []struct {
 		name string
@@ -62,7 +75,12 @@ func TestMessagesHandlerRejectsInvalidUserID(t *testing.T) {
 }
 
 func TestMessagesHandlerRejectsUnknownRoute(t *testing.T) {
-	handler := messagesHandler(nil)
+	handler := messagesHandler(func(
+		ctx context.Context,
+		userID string,
+	) ([]bson.M, error) {
+		return []bson.M{}, nil
+	})
 
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -79,5 +97,61 @@ func TestMessagesHandlerRejectsUnknownRoute(t *testing.T) {
 			http.StatusNotFound,
 			recorder.Code,
 		)
+	}
+
+}
+
+func TestMessagesHandlerReturnsUserMessages(t *testing.T) {
+	expectedMessage := bson.M{
+		"messageId":   "test-message-1",
+		"userId":      "user123",
+		"phoneNumber": "911111111111",
+		"message":     "Hello from test",
+		"status":      "SUCCESS",
+	}
+
+	handler := messagesHandler(func(
+		ctx context.Context,
+		userID string,
+	) ([]bson.M, error) {
+		if userID != "user123" {
+			t.Errorf("expected userID user123, got %q", userID)
+		}
+
+		return []bson.M{expectedMessage}, nil
+	})
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/user/user123/messages",
+		nil,
+	)
+	recorder := httptest.NewRecorder()
+
+	handler(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("expected application/json, got %q", got)
+	}
+
+	var messages []bson.M
+	if err := json.Unmarshal(recorder.Body.Bytes(), &messages); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+
+	if messages[0]["messageId"] != "test-message-1" {
+		t.Errorf("unexpected messageId: %v", messages[0]["messageId"])
+	}
+
+	if messages[0]["userId"] != "user123" {
+		t.Errorf("unexpected userId: %v", messages[0]["userId"])
 	}
 }

@@ -43,7 +43,12 @@ func parseCreatedAt(raw json.RawMessage) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, timestamp)
 }
 
-func messagesHandler(collection *mongo.Collection) http.HandlerFunc {
+type MessagesFinder func(
+	ctx context.Context,
+	userID string,
+) ([]bson.M, error)
+
+func messagesHandler(findMessages MessagesFinder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -70,30 +75,39 @@ func messagesHandler(collection *mongo.Collection) http.HandlerFunc {
 		queryCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		cursor, err := collection.Find(queryCtx, bson.M{"userId": userID})
+		messages, err := findMessages(queryCtx, userID)
 		if err != nil {
 			log.Printf("Query messages for user %s: %v", userID, err)
 			http.Error(w, "Failed to retrieve messages",
 				http.StatusInternalServerError)
 			return
 		}
-		defer cursor.Close(queryCtx)
 
-		var messages []bson.M
-		if err := cursor.All(queryCtx, &messages); err != nil {
-			log.Printf("Decode messages for user %s: %v", userID, err)
-			http.Error(w, "Failed to retrieve messages",
-				http.StatusInternalServerError)
-			return
+		if messages == nil {
+			messages = []bson.M{}
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(messages); err != nil {
 			log.Printf("Write response for user %s: %v", userID, err)
 		}
 	}
 }
+func findUserMessages(collection *mongo.Collection) MessagesFinder {
+	return func(ctx context.Context, userID string) ([]bson.M, error) {
+		cursor, err := collection.Find(ctx, bson.M{"userId": userID})
+		if err != nil {
+			return nil, err
+		}
+		defer cursor.Close(ctx)
 
+		var messages []bson.M
+		if err := cursor.All(ctx, &messages); err != nil {
+			return nil, err
+		}
+
+		return messages, nil
+	}
+}
 func main() {
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
@@ -127,7 +141,7 @@ func main() {
 
 	collection := client.Database("polyglot").Collection("sms_messages")
 
-	http.HandleFunc("/v1/user/", messagesHandler(collection))
+	http.HandleFunc("/v1/user/", messagesHandler(findUserMessages(collection)))
 
 	go func() {
 		log.Println("HTTP API listening on :8081")
