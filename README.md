@@ -1,166 +1,237 @@
 # Polyglot Distributed SMS Service
 
-A distributed SMS messaging system built with **Java Spring Boot, Go, Apache Kafka, Redis, MongoDB, and Docker**. The project demonstrates asynchronous event-driven communication between services implemented in different programming languages.
+A distributed SMS messaging system built with **Java Spring Boot, Go,
+Apache Kafka, Redis, MongoDB, and Docker**. It demonstrates event-driven
+communication between services implemented in different programming
+languages.
 
 ## Architecture
 
-```text
+``` text
 Client
   |
   v
 Spring Boot SMS Sender (Java)
+  |                         \
+  |                          +--> Redis: blocked_users set
   |
-  +----> Redis: Check blocked phone numbers
-  |
-  +----> Mock SMS Vendor
+  +--> Mock SMS Vendor
   |
   v
-Apache Kafka: sms-events
+Kafka: sms-events
   |
   v
 Go Consumer
   |
   v
-MongoDB: Persist SMS history
+MongoDB: polyglot.sms_messages
   |
   v
-Go REST API: Retrieve user messages
+Go REST API: GET /v1/user/{userId}/messages
+
+Invalid Kafka events
+  |
+  v
+Kafka: sms-events-dead-letter
 ```
 
-The Java service validates an SMS request, checks the Redis block list, simulates sending through a mock vendor, and publishes a message event to Kafka. The Go service consumes those events and persists them in MongoDB. A separate Go API provides access to stored message history.
+The Java service validates an SMS request, checks Redis, simulates
+sending through a mock vendor, and publishes an event to Kafka. The Go
+consumer validates incoming events and persists valid events in MongoDB.
+Invalid events are published to a dead-letter topic (DLQ). The Go HTTP
+API retrieves stored message history by user ID.
+
+**Delivery note:** the SMS vendor is mocked. A `SUCCESS` response
+demonstrates the application flow; it does not represent delivery
+through a real SMS provider.
 
 ## Tech Stack
 
-| Technology | Purpose |
-|---|---|
-| Java 21 | SMS sender service |
-| Spring Boot | REST API and application framework |
-| Gradle | Java build and dependency management |
-| Redis | Block-list lookup |
-| Apache Kafka | Asynchronous event streaming |
-| Go | Event consumer and message history API |
-| MongoDB | Message persistence |
-| Docker | Containerization |
-| Docker Compose | Local multi-service environment |
+Technology                Purpose
+  ------------------------- -----------------------------------------
+Java 21                   SMS sender service
+Spring Boot               REST API and application framework
+Gradle                    Java build and dependency management
+Redis                     Phone-number blocklist
+Apache Kafka              Event streaming between Java and Go
+Go                        Kafka consumer and message-history API
+MongoDB                   SMS event persistence
+Docker / Docker Compose   Local infrastructure and Java container
 
 ## Features
 
-- REST endpoint for sending SMS requests.
-- Mock SMS vendor for simulating successful delivery.
-- Redis-based phone number block list.
-- Kafka event publishing with JSON serialization.
-- Dockerized Spring Boot service, Kafka, and Redis.
-- Planned Go consumer and MongoDB-backed message history API.
+-   `POST /v1/sms/send` endpoint with request validation.
+-   Mock SMS vendor response.
+-   Redis blocklist using the `blocked_users` set.
+-   Kafka event publishing with JSON serialization.
+-   Go Kafka consumer with event validation.
+-   MongoDB persistence with `messageId` used as the document `_id` to
+    prevent duplicate documents.
+-   Dead-letter handling for malformed JSON and invalid events.
+-   `GET /v1/user/{userId}/messages` API backed by MongoDB.
+-   Unit tests for Java request validation and SMS service logic, and Go
+    message API/event validation.
+-   Docker Compose environment for the Java service, Kafka, Redis, and
+    MongoDB.
 
 ## Prerequisites
 
-Install the following before running the project:
+-   Docker Desktop with Docker Compose.
+-   Git.
+-   Go installed locally to run the Go consumer.
+-   PowerShell or another terminal.
 
-- Docker Desktop with Docker Compose.
-- Git.
-- PowerShell or another terminal.
-
-A local Java or Gradle installation is not required for the Docker-based build.
+The Java service is built inside Docker using the Gradle wrapper. A
+separate local Java/Gradle installation is not required for the
+Docker-based build. The Go consumer is run locally in the instructions
+below.
 
 ## Getting Started
 
 ### 1. Clone the repository
 
-```bash
+``` powershell
 git clone <YOUR_REPOSITORY_URL>
 cd polyglot-distributed-sms-service
 ```
 
-Replace `<YOUR_REPOSITORY_URL>` with your GitHub repository URL.
+Replace `<YOUR_REPOSITORY_URL>` with your repository URL.
 
-### 2. Start the services
+### 2. Start the infrastructure and Java service
 
-```bash
+``` powershell
 docker compose up -d --build
-```
-
-This builds the Spring Boot application inside Docker and starts the configured services.
-
-Check their status:
-
-```bash
 docker compose ps
 ```
 
-View the SMS sender logs:
+The Compose configuration starts the configured Java service, Kafka,
+Redis, and MongoDB containers.
 
-```bash
+View the Java service logs:
+
+``` powershell
 docker logs -f polyglot-sms-sender
 ```
 
-### 3. Send an SMS request
+### 3. Configure and run the Go consumer
 
-The SMS sender exposes:
+Open a separate PowerShell terminal from the repository root:
 
-`POST /v1/sms/send`
+``` powershell
+cd go-consumer
+$env:MONGODB_URI = "mongodb://localhost:27017"
+$env:KAFKA_BROKERS = "localhost:9092"
+go run .
+```
 
-Example request using PowerShell:
+The defaults in the Go program are `mongodb://localhost:27017` and
+`localhost:9092`; setting them explicitly makes the local setup clear.
+Keep this terminal running. The Go HTTP API listens on port `8081`.
 
-```powershell
+To use MongoDB Atlas instead, set `MONGODB_URI` to your Atlas connection
+string in the terminal that launches the Go process. Never commit
+credentials or paste a real connection string into public documentation.
+
+### 4. Send an SMS request
+
+The Java service exposes `POST http://localhost:8080/v1/sms/send`.
+
+``` powershell
 $body = @{
-    phoneNumber = "911111111111"
-    message = "Hello from the distributed SMS service"
+    userId = "user-123"
+    phoneNumber = "+919876543210"
+    message = "Hello from Polyglot"
 } | ConvertTo-Json
 
 Invoke-RestMethod `
     -Uri "http://localhost:8080/v1/sms/send" `
-    -Method POST `
+    -Method Post `
     -ContentType "application/json" `
-    -Body $body
+    -Body $body |
+    ConvertTo-Json -Depth 5
 ```
 
 Example successful response:
 
-```json
+``` json
 {
-  "phoneNumber": "911111111111",
+  "phoneNumber": "+919876543210",
   "status": "SUCCESS",
   "messageId": "generated-message-id"
 }
 ```
 
-The `messageId` is generated by the application; the value above is illustrative.
+The `messageId` is generated by the application. The example value is
+illustrative. The request requires `userId`, `phoneNumber`, and
+`message`.
 
-### 4. Test the Redis block list
+### 5. Retrieve a user's message history
 
-Add a phone number to the Redis block list:
+After the Go consumer logs that it saved the event, query the Go API:
 
-```powershell
-docker exec polyglot-redis redis-cli SADD blocked_users 919876543210
+``` powershell
+Invoke-RestMethod `
+    -Uri "http://localhost:8081/v1/user/user-123/messages" `
+    -Method Get |
+    ConvertTo-Json -Depth 5
 ```
 
-Send a request using that phone number. The service should return `BLOCKED` without publishing an SMS event.
+The response is a JSON array of persisted message documents. An empty
+result means no messages are stored for that user in the database used
+by the Go process.
 
-To remove the number from the block list:
+### 6. Test the Redis blocklist
 
-```powershell
-docker exec polyglot-redis redis-cli SREM blocked_users 919876543210
+Add a phone number to the blocklist:
+
+``` powershell
+docker exec polyglot-redis redis-cli SADD blocked_users "+919876543210"
 ```
 
-### 5. Inspect Kafka events
+Send an SMS request using that phone number. The service should return
+`BLOCKED` with a null `messageId`, without invoking the mock vendor or
+publishing a Kafka event.
 
-List Kafka topics:
+Remove the test number when finished:
 
-```powershell
+``` powershell
+docker exec polyglot-redis redis-cli SREM blocked_users "+919876543210"
+```
+
+### 7. Inspect Kafka topics and dead-letter events
+
+List topics:
+
+``` powershell
 docker exec polyglot-kafka /opt/kafka/bin/kafka-topics.sh `
     --bootstrap-server localhost:9092 --list
 ```
 
-Consume SMS events:
+The application uses `sms-events`. Invalid events are published to
+`sms-events-dead-letter`. If automatic topic creation is disabled,
+create the DLQ topic:
 
-```powershell
+``` powershell
+docker exec polyglot-kafka /opt/kafka/bin/kafka-topics.sh `
+    --bootstrap-server localhost:9092 `
+    --create --topic sms-events-dead-letter `
+    --partitions 1 --replication-factor 1
+```
+
+Read DLQ events:
+
+``` powershell
 docker exec -it polyglot-kafka /opt/kafka/bin/kafka-console-consumer.sh `
     --bootstrap-server localhost:9092 `
-    --topic sms-events `
+    --topic sms-events-dead-letter `
     --from-beginning
 ```
 
-Published events contain the message ID, phone number, message, vendor status, and creation timestamp.
+Each DLQ record contains the original topic, partition, offset, key,
+payload, failure reason, and timestamp. The consumer publishes an
+invalid event to the DLQ before committing its original offset. If DLQ
+publishing fails, the original message is not committed and can be
+retried.
 
 ## API Reference
 
@@ -170,92 +241,126 @@ Published events contain the message ID, phone number, message, vendor status, a
 
 Request body:
 
-```json
+``` json
 {
-  "phoneNumber": "911111111111",
+  "userId": "user-123",
+  "phoneNumber": "+919876543210",
   "message": "Hello!"
 }
 ```
 
-Possible application statuses:
+The phone number must match the international-format validation rule in
+the Java request DTO. `userId` and `message` must be non-blank; the
+message is limited to 1600 characters.
 
-- `SUCCESS` — the mock vendor reports success.
-- `BLOCKED` — the phone number is present in the Redis block list.
+Possible statuses:
+
+-   `SUCCESS` --- the mock vendor reports success.
+-   `FAILURE` --- the mock vendor reports failure if configured to do
+    so.
+-   `BLOCKED` --- the phone number is in Redis's blocklist; no event is
+    published for this request.
+
+Invalid request fields return HTTP `400`.
 
 ### Retrieve user message history
 
-**Planned endpoint:** `GET /v1/user/{User_id}/messages`
+**Endpoint:** `GET /v1/user/{userId}/messages`
 
-The Go service will expose this endpoint to retrieve persisted SMS history from MongoDB. The Go consumer, persistence layer, and retrieval API are not yet included in the currently verified implementation.
+The Go service returns stored messages for the specified user ID from
+MongoDB. Invalid user IDs return HTTP `400`; unsupported methods return
+HTTP `405`.
 
-## Docker Services
+## Docker Services and Ports
 
-The current Compose configuration runs:
+Service        Container                       Host port
+  -------------- ----------------------------- -----------
+SMS Sender     `polyglot-sms-sender`              `8080`
+Apache Kafka   `polyglot-kafka`                   `9092`
+Redis          `polyglot-redis`                   `6379`
+MongoDB        `polyglot-mongodb`                `27017`
+Go HTTP API    Run locally with `go run .`        `8081`
 
-| Service | Container | Port |
-|---|---|---|
-| SMS Sender | `polyglot-sms-sender` | `8080` |
-| Apache Kafka | `polyglot-kafka` | `9092` |
-| Redis | `polyglot-redis` | `6379` |
+Inside the Docker network, Spring Boot connects to Kafka using
+`kafka:29092` and Redis using `redis:6379`. The Go consumer in these
+instructions runs on the host, so it uses `localhost:9092` and
+`localhost:27017`.
 
-Inside the Docker network, the Spring Boot application connects to Kafka using `kafka:29092` and Redis using `redis:6379`.
+## Tests and Build Checks
+
+From the repository root, run the Java tests:
+
+``` powershell
+.\gradlew.bat clean test
+```
+
+From the `go-consumer` directory, run Go tests and compile the consumer:
+
+``` powershell
+go test ./...
+go build .
+```
 
 ## Project Structure
 
-```text
+``` text
 polyglot-distributed-sms-service/
 ├── src/
-│   └── main/
-│       ├── java/com/amol/sms_sender/
-│       │   ├── controller/
-│       │   ├── dto/
-│       │   └── service/
-│       └── resources/
-│           └── application.properties
-├── gradle/
-│   └── wrapper/
+│   ├── main/
+│   │   ├── java/com/amol/sms_sender/
+│   │   │   ├── controller/
+│   │   │   ├── dto/
+│   │   │   └── service/
+│   │   └── resources/
+│   │       └── application.properties
+│   └── test/
+├── go-consumer/
+│   ├── main.go
+│   ├── main_test.go
+│   ├── event_test.go
+│   └── go.mod
+├── gradle/wrapper/
 ├── Dockerfile
 ├── compose.yaml
 ├── build.gradle
 ├── settings.gradle
-├── .dockerignore
 └── README.md
 ```
 
-The Go consumer and MongoDB components will be added as the project progresses.
-
 ## Current Implementation Status
 
-- [x] Spring Boot SMS REST endpoint
-- [x] Mock SMS vendor integration
-- [x] Redis phone number block list
-- [x] Kafka event publishing
-- [x] JSON serialization of SMS events
-- [x] Docker-based Java build
-- [x] Docker Compose setup for Java, Kafka, and Redis
-- [ ] Go Kafka consumer
-- [ ] MongoDB persistence
-- [ ] Go message history API
-- [ ] End-to-end integration tests
+-   [x] Spring Boot SMS REST endpoint and request validation
+-   [x] Mock SMS vendor integration
+-   [x] Redis phone-number blocklist
+-   [x] Kafka event publishing
+-   [x] Go Kafka consumer and event validation
+-   [x] MongoDB persistence
+-   [x] Go message-history API
+-   [x] Dead-letter handling for invalid events
+-   [x] Duplicate-document protection using `messageId`
+-   [x] Java unit tests and Go tests
+-   [x] End-to-end SMS flow tested locally
 
 ## Stopping the Services
 
-Stop the Compose services:
+Stop Compose services:
 
-```bash
+``` powershell
 docker compose down
 ```
 
-To remove containers and their associated Compose network, use the command above. Persistent data volumes, if configured separately, are not removed by default.
+This stops and removes the Compose containers and network. Named volumes
+are retained unless explicitly removed. To remove persistent local data
+as well, inspect the Compose volume configuration first and use
+`docker compose down -v` only if you intend to delete it.
 
 ## Learning Objectives
 
-This project explores:
-
-- REST API development with Spring Boot.
-- Event-driven architecture and asynchronous messaging.
-- Kafka producers and consumers.
-- Redis-based request filtering.
-- Cross-language service integration between Java and Go.
-- MongoDB persistence.
-- Docker multi-stage builds and container networking.
+-   REST API development with Spring Boot.
+-   Event-driven architecture and asynchronous messaging.
+-   Kafka producers, consumers, and offset handling.
+-   Redis-based request filtering.
+-   Cross-language service integration between Java and Go.
+-   MongoDB persistence and duplicate handling.
+-   Dead-letter queues for invalid events.
+-   Docker multi-stage builds and container networking.
