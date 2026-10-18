@@ -40,6 +40,7 @@ public class SmsService {
 
         SmsEvent event = new SmsEvent(
                 messageId,
+                request.getUserId(),
                 phoneNumber,
                 request.getMessage(),
                 vendorStatus,
