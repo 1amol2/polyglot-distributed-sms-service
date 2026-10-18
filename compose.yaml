@@ -36,3 +36,16 @@ services:
     depends_on:
       - kafka
       - redis
+
+
+  mongodb:
+    image: mongo:7
+    container_name: polyglot-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
