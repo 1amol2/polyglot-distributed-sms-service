@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +25,15 @@ type SmsEvent struct {
 	Status      string          `json:"status" bson:"status"`
 	CreatedAt   json.RawMessage `json:"createdAt" bson:"createdAt"`
 	UserID      string          `json:"userId" bson:"userId"`
+}
+type DeadLetterEvent struct {
+	OriginalTopic     string    `json:"originalTopic"`
+	OriginalPartition int       `json:"originalPartition"`
+	OriginalOffset    int64     `json:"originalOffset"`
+	OriginalKey       string    `json:"originalKey"`
+	OriginalValue     string    `json:"originalValue"`
+	Reason            string    `json:"reason"`
+	FailedAt          time.Time `json:"failedAt"`
 }
 
 func parseCreatedAt(raw json.RawMessage) (time.Time, error) {
@@ -92,6 +102,67 @@ func messagesHandler(findMessages MessagesFinder) http.HandlerFunc {
 		}
 	}
 }
+func validateEvent(event SmsEvent) (time.Time, error) {
+	if event.MessageID == "" {
+		return time.Time{}, fmt.Errorf("messageId is required")
+	}
+
+	if event.UserID == "" {
+		return time.Time{}, fmt.Errorf("userId is required")
+	}
+
+	if event.PhoneNumber == "" {
+		return time.Time{}, fmt.Errorf("phoneNumber is required")
+	}
+
+	if event.Message == "" {
+		return time.Time{}, fmt.Errorf("message is required")
+	}
+
+	if event.Status != "SUCCESS" && event.Status != "FAILURE" {
+		return time.Time{}, fmt.Errorf("invalid status %q", event.Status)
+	}
+
+	createdAt, err := parseCreatedAt(event.CreatedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid createdAt: %w", err)
+	}
+
+	return createdAt, nil
+}
+func publishToDeadLetter(
+	ctx context.Context,
+	writer *kafka.Writer,
+	message kafka.Message,
+	reason string,
+) error {
+	event := DeadLetterEvent{
+		OriginalTopic:     message.Topic,
+		OriginalPartition: message.Partition,
+		OriginalOffset:    message.Offset,
+		OriginalKey:       string(message.Key),
+		OriginalValue:     string(message.Value),
+		Reason:            reason,
+		FailedAt:          time.Now().UTC(),
+	}
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal dead-letter event: %w", err)
+	}
+
+	deadLetterKey := fmt.Sprintf(
+		"%s-%d-%d",
+		message.Topic,
+		message.Partition,
+		message.Offset,
+	)
+
+	return writer.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(deadLetterKey),
+		Value: payload,
+	})
+}
 func findUserMessages(collection *mongo.Collection) MessagesFinder {
 	return func(ctx context.Context, userID string) ([]bson.M, error) {
 		cursor, err := collection.Find(ctx, bson.M{"userId": userID})
@@ -154,7 +225,18 @@ func main() {
 	if broker == "" {
 		broker = "localhost:9092"
 	}
+	deadLetterWriter := &kafka.Writer{
+		Addr:         kafka.TCP(broker),
+		Topic:        "sms-events-dead-letter",
+		Balancer:     &kafka.Hash{},
+		RequiredAcks: kafka.RequireAll,
+	}
 
+	defer func() {
+		if err := deadLetterWriter.Close(); err != nil {
+			log.Printf("Close dead-letter writer: %v", err)
+		}
+	}()
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{broker},
 		Topic:       "sms-events",
@@ -182,24 +264,37 @@ func main() {
 		}
 
 		var event SmsEvent
+
 		if err := json.Unmarshal(message.Value, &event); err != nil {
-			log.Printf("Invalid JSON at offset %d: %v", message.Offset, err)
+			reason := fmt.Sprintf("invalid JSON: %v", err)
+
+			if dlqErr := publishToDeadLetter(
+				ctx, deadLetterWriter, message, reason,
+			); dlqErr != nil {
+				log.Printf("Publish invalid JSON to DLQ: %v", dlqErr)
+				continue
+			}
+
+			if err := reader.CommitMessages(ctx, message); err != nil {
+				log.Printf("Commit invalid JSON event: %v", err)
+			}
 			continue
 		}
 
-		if event.MessageID == "" {
-			log.Printf("Skipping event without messageId at offset %d", message.Offset)
-			continue
-		}
-
-		// Use messageId as MongoDB's _id so replayed events
-		// don't create duplicate documents.
-		createdAt, err := parseCreatedAt(event.CreatedAt)
+		createdAt, err := validateEvent(event)
 		if err != nil {
-			log.Printf("Invalid createdAt for event %s: %v", event.MessageID, err)
+			if dlqErr := publishToDeadLetter(
+				ctx, deadLetterWriter, message, err.Error(),
+			); dlqErr != nil {
+				log.Printf("Publish invalid event to DLQ: %v", dlqErr)
+				continue
+			}
+
+			if err := reader.CommitMessages(ctx, message); err != nil {
+				log.Printf("Commit invalid event: %v", err)
+			}
 			continue
 		}
-
 		document := bson.M{
 			"_id":         event.MessageID,
 			"messageId":   event.MessageID,
